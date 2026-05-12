@@ -121,6 +121,11 @@ register(
     entry_point='stable_worldmodel.envs.piecewise.piecewise_env:PiecewiseEnv',
 )
 
+register(
+    id='swm/Libero-v0',
+    entry_point='stable_worldmodel.envs.libero:Libero',
+)
+
 _GYM_CONTROL = 'stable_worldmodel.envs.gymnasium_control'
 register(
     id='swm/CartPoleControl-v1',

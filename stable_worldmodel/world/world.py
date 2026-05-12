@@ -469,15 +469,44 @@ class World:
                 )
 
         shape_prefix = self.infos['pixels'].shape[:2]
+
         for src, dst_prefix in [(init_state, ''), (goal_state, '')]:
             for k, v in src.items():
                 key = dst_prefix + k if dst_prefix else k
                 if key in self.infos or key in goal_state:
+                    target_shape = shape_prefix + v.shape[1:]
                     self.infos[key] = np.broadcast_to(
-                        v[:, None, ...], shape_prefix + v.shape[1:]
+                        v[:, None, ...], target_shape
                     ).copy()
 
         goal_snapshot = {k: self.infos[k].copy() for k in goal_state}
+
+        if video:
+            v_path = Path(video)
+            v_path.mkdir(parents=True, exist_ok=True)
+            import imageio
+
+            def _to_vis(img):
+                if torch.is_tensor(img): img = img.detach().cpu().numpy()
+                if img.ndim > 3: img = img[0]
+                if img.ndim == 3 and img.shape[0] in (1, 3):
+                    img = np.moveaxis(img, 0, -1)
+                if img.dtype != np.uint8:
+                    img_min = np.nanmin(img)
+                    img_max = np.nanmax(img)
+                    if img_min < 0.0:
+                        # ImageNet-style unnormalization for already normalized debug tensors.
+                        img = np.clip(img * 0.225 + 0.45, 0, 1)
+                        img = (img * 255).astype(np.uint8)
+                    elif img_max <= 1.05:
+                        img = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+                    else:
+                        img = np.clip(img, 0, 255).astype(np.uint8)
+                return img
+
+            for i in range(n):
+                imageio.imwrite(v_path / f'env_{i}_start.png', _to_vis(self.infos['pixels'][i]))
+                imageio.imwrite(v_path / f'env_{i}_goal.png', _to_vis(self.infos['goal'][i]))
 
         results = {
             'success_rate': 0.0,
@@ -515,6 +544,18 @@ def _save_video(path: Path, frames: list[np.ndarray], fps: int = 15) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     out = imageio.get_writer(str(path), fps=fps, codec='libx264')
     for f in frames:
+        if torch.is_tensor(f):
+            f = f.detach().cpu().numpy()
+        if f.ndim == 3 and f.shape[0] in (1, 3):
+            f = np.moveaxis(f, 0, -1)
+        if f.dtype != np.uint8:
+            if np.nanmin(f) < 0.0:
+                f = np.clip(f * 0.225 + 0.45, 0, 1)
+                f = (f * 255).astype(np.uint8)
+            elif np.nanmax(f) <= 1.05:
+                f = (np.clip(f, 0, 1) * 255).astype(np.uint8)
+            else:
+                f = np.clip(f, 0, 255).astype(np.uint8)
         out.append_data(f)
     out.close()
 

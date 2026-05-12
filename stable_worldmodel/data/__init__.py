@@ -20,7 +20,7 @@ from . import formats as _formats  # noqa: F401
 # imports like `from stable_worldmodel.data import LanceDataset` keep working.
 # Optional formats (hdf5, video) are re-exported only when their extras are
 # installed; absent ones are simply not bound at module level.
-from .formats.lance import LanceDataset, LanceWriter
+from .formats.lance_format import LanceDataset, LanceWriter
 from .formats.folder import FolderDataset, FolderWriter, ImageDataset
 from .formats.lerobot import LeRobotAdapter
 

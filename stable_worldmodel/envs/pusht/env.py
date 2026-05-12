@@ -582,7 +582,8 @@ class PushT(gym.Env):
         )
 
         # Add collision handling
-        self.space.on_collision(0, 0, post_solve=self._handle_collision)
+        handler = self.space.add_collision_handler(0, 0)
+        handler.post_solve = self._handle_collision
         self.n_contact_points = 0
 
         self.max_score = 50 * 100

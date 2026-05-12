@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging as _logging
 
-from . import lance  # noqa: F401
+from . import lance_format  # noqa: F401
 from . import folder  # noqa: F401
 from . import lerobot  # noqa: F401
 

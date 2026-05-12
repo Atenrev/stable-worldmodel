@@ -188,11 +188,14 @@ def _write_env_info(stacked: dict, idx: int, info: dict) -> None:
         if k not in stacked:
             continue
         buf = stacked[k]
-        if isinstance(buf, torch.Tensor):
-            if not isinstance(v, torch.Tensor):
-                v = torch.as_tensor(v, dtype=buf.dtype, device=buf.device)
-            buf[idx, 0] = v
-        elif isinstance(buf, np.ndarray):
-            buf[idx, 0] = v
-        elif isinstance(buf, list):
-            buf[idx][0] = v
+        try:
+            if isinstance(buf, torch.Tensor):
+                if not isinstance(v, torch.Tensor):
+                    v = torch.as_tensor(v, dtype=buf.dtype, device=buf.device)
+                buf[idx, 0] = v
+            elif isinstance(buf, np.ndarray):
+                buf[idx, 0] = v
+            elif isinstance(buf, list):
+                buf[idx][0] = v
+        except Exception as e:
+            raise ValueError(f"Key '{k}': failed to assign {getattr(v, 'shape', 'none')} into {getattr(buf, 'shape', 'none')}") from e

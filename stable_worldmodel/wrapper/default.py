@@ -234,6 +234,8 @@ class EverythingToInfoWrapper(gym.Wrapper):
             _obs = obs
 
         for key, val in _obs.items():
+            if key in info:
+                print(f"Wrapper: Overlapping key '{key}' between obs and info!")
             assert key not in info
             info[key] = val
 
@@ -297,6 +299,8 @@ class EverythingToInfoWrapper(gym.Wrapper):
         else:
             _obs = obs
         for key, val in _obs.items():
+            if key in info:
+                print(f"Wrapper: Overlapping key '{key}' between obs and info!")
             assert key not in info
             info[key] = val
         assert 'reward' not in info

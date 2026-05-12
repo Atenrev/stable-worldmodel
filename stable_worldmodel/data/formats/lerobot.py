@@ -265,7 +265,7 @@ class LeRobotAdapter(Dataset):
         if cache_key not in self._window_datasets:
             delta_timestamps = {}
             for key in self._keys:
-                if key in self._SYNTHETIC_COLUMNS:
+                if key in self._SYNTHETIC_COLUMNS or key in ('task_index', 'relative_idx'):
                     continue
                 native_key = self._alias_to_native.get(key)
                 if native_key is None:
@@ -309,8 +309,10 @@ class LeRobotAdapter(Dataset):
             return int(self._cache['ep_idx'][item['_row_idx']])
         if key == 'step_idx':
             return int(self._cache['step_idx'][item['_row_idx']])
+        if key == 'relative_idx':
+            return int(self._cache['relative_idx'][item['_row_idx']])
 
-        native_key = self._alias_to_native[key]
+        native_key = self._alias_to_native.get(key, key)
         return item[native_key]
 
     def _load_slice(self, ep_idx: int, start: int, end: int) -> dict:
@@ -340,6 +342,12 @@ class LeRobotAdapter(Dataset):
             if isinstance(data, torch.Tensor):
                 if data.ndim == 4 and data.shape[-1] in (1, 3):
                     data = data.permute(0, 3, 1, 2)
+            elif isinstance(data, (int, float)):
+                data = torch.tensor(data)
+
+            if isinstance(data, torch.Tensor) and data.ndim == 0:
+                data = data.expand(len(obs_indices))
+
             steps[key] = data
 
         return self.transform(steps) if self.transform else steps
