@@ -30,6 +30,11 @@ except ImportError:
     pass
 
 try:
+    from .formats.lmdb import LMDBDataset, LMDBWriter  # noqa: F401
+except ImportError:
+    pass
+
+try:
     from .formats.video import VideoDataset, VideoWriter  # noqa: F401
 except ImportError:
     pass

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -68,10 +69,23 @@ class HDF5Dataset(Dataset):
         return self._keys
 
     def _open(self) -> None:
+        # Get the current process ID
+        curr_pid = os.getpid()
+        
+        # If the PID has changed since we last opened the file, 
+        # it means we are in a new DataLoader worker. Reset everything.
+        if hasattr(self, '_handle_pid') and self._handle_pid != curr_pid:
+            self.h5_file = None 
+
         if self.h5_file is None:
+            # Use libver='latest' and disable locking for maximum stability in workers
             self.h5_file = h5py.File(
-                self.h5_path, 'r', swmr=True, rdcc_nbytes=256 * 1024 * 1024
+                self.h5_path, 'r', 
+                swmr=True, 
+                rdcc_nbytes=256 * 1024 * 1024,
+                libver='latest' 
             )
+            self._handle_pid = curr_pid
 
     def _load_slice(self, ep_idx: int, start: int, end: int) -> dict:
         self._open()
