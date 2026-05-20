@@ -227,7 +227,7 @@ class World:
                 mode,
             )
         mode = reset_mode or 'auto'
-        return self._evaluate(episodes, seed, options, video, mode)
+        return self._evaluate(episodes, seed, options, video, mode, eval_budget)
 
     def collect(
         self,
@@ -394,15 +394,16 @@ class World:
     def _get_actions(self) -> np.ndarray:
         return self.policy.get_action(self.infos)
 
-    def _evaluate(self, episodes, seed, options, video, mode) -> dict:
+    def _evaluate(self, episodes, seed, options, video, mode, max_steps) -> dict:
         results = {
             'success_rate': 0.0,
-            'episode_successes': np.zeros(episodes),
+            'episode_successes': np.zeros(episodes, dtype=bool),
             'seeds': np.zeros(episodes, dtype=np.int64),
         }
         frames: dict[int, list] = defaultdict(list) if video else None
 
         def on_step(world):
+            results['episode_successes'] |= world.terminateds
             if frames is not None:
                 for i in range(world.num_envs):
                     f = world.infos['pixels'][i]
@@ -417,6 +418,8 @@ class World:
                     Path(video) / f'episode_{ep_idx}.mp4',
                     frames.pop(env_idx, []),
                 )
+                
+        self.reset(seed=seed, options=options)
 
         self._run(
             episodes=episodes,
@@ -424,17 +427,19 @@ class World:
             options=options,
             mode=mode,
             on_step=on_step,
-            on_done=on_done,
+            # on_done=on_done,
+            max_steps=max_steps,
         )
 
         results['success_rate'] = (
             float(results['episode_successes'].sum()) / episodes * 100.0
         )
+        
         if frames:
+            Path(video).mkdir(parents=True, exist_ok=True)
             for env_idx, f in frames.items():
-                _save_video(
-                    Path(video) / f'episode_remaining_{env_idx}.mp4', f
-                )
+                _save_video(Path(video) / f'env_{env_idx}.mp4', f)
+                
         return results
 
     def _evaluate_from_dataset(
