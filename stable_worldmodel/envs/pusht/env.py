@@ -36,12 +36,14 @@ class PushT(gym.Env):
         render_mode='rgb_array',
         relative=True,
         init_value=None,
+        block_only_success=False,
     ):
         self._seed = None
         self.window_size = ws = 512  # The size of the PyGame window
         self.render_size = resolution
         self.relative = relative
         self.action_scale = 100
+        self.block_only_success = block_only_success
 
         # physics
         self.control_hz = self.metadata['render_fps']
@@ -345,12 +347,21 @@ class PushT(gym.Env):
         return observation, reward, terminated, truncated, info
 
     def eval_state(self, goal_state, cur_state):
-        # success if position difference is < 20, and angle difference < np.pi/9
-        pos_diff = np.linalg.norm(goal_state[:4] - cur_state[:4])
-        angle_diff = np.abs(goal_state[4] - cur_state[4])
-        angle_diff = np.minimum(angle_diff, 2 * np.pi - angle_diff)
-        success = pos_diff < 20 and angle_diff < np.pi / 9
-        state_dist = np.linalg.norm(goal_state - cur_state)
+        if self.block_only_success:
+            # Compare against the objective goal pose (LightGreen block)
+            # self.goal_pose contains (x, y, angle)
+            pos_diff = np.linalg.norm(self.goal_pose[:2] - cur_state[2:4])
+            angle_diff = np.abs(self.goal_pose[2] - cur_state[4])
+            angle_diff = np.minimum(angle_diff, 2 * np.pi - angle_diff)
+            success = pos_diff < 20 and angle_diff < np.pi / 9
+            state_dist = np.linalg.norm(self.goal_pose[:3] - cur_state[2:5])
+        else:
+            # original success condition: compare against goal_state (which includes agent)
+            pos_diff = np.linalg.norm(goal_state[:4] - cur_state[:4])
+            angle_diff = np.abs(goal_state[4] - cur_state[4])
+            angle_diff = np.minimum(angle_diff, 2 * np.pi - angle_diff)
+            success = pos_diff < 20 and angle_diff < np.pi / 9
+            state_dist = np.linalg.norm(goal_state - cur_state)
 
         return success, state_dist
 
