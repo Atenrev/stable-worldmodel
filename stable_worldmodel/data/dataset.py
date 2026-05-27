@@ -40,6 +40,7 @@ class Dataset:
         frameskip: int = 1,
         num_steps: int = 1,
         transform: Callable[[dict], dict] | None = None,
+        fixed_step_size: bool = True,
     ) -> None:
         self.lengths = lengths
         self.offsets = offsets
@@ -47,12 +48,20 @@ class Dataset:
         self.num_steps = num_steps
         self.span = num_steps * frameskip
         self.transform = transform
-        self.clip_indices = [
-            (ep, start)
-            for ep, length in enumerate(lengths)
-            if length >= self.span
-            for start in range(length - self.span + 1)
-        ]
+        self.fixed_step_size = fixed_step_size
+        if fixed_step_size:
+            self.clip_indices = [
+                (ep, start, start + self.span)
+                for ep, length in enumerate(lengths)
+                if length >= self.span
+                for start in range(length - self.span + 1)
+            ]
+        else:
+            self.clip_indices = [
+                (ep, start, length)
+                for ep, length in enumerate(lengths)
+                for start in range(length-1)
+            ]
 
     @property
     def column_names(self) -> list[str]:
@@ -65,10 +74,57 @@ class Dataset:
         return len(self.clip_indices)
 
     def __getitem__(self, idx: int) -> dict:
-        ep_idx, start = self.clip_indices[idx]
-        steps = self._load_slice(ep_idx, start, start + self.span)
+        ep_idx, start, ep_end = self.clip_indices[idx]
+
+        if self.fixed_step_size:
+            # Original path: always a clean fixed window, one slice call.
+            end = start + self.span
+            steps = self._load_slice(ep_idx, start, end)
+            # Pad if somehow short (shouldn't happen given clip_indices construction)
+            for k, v in steps.items():
+                if isinstance(v, torch.Tensor) and v.shape[0] < self.num_steps:
+                    steps[k] = v.repeat(self.num_steps, *[1] * (v.ndim - 1))
+        else:
+            # Variable path: derive the right window BEFORE calling _load_slice.
+            ep_len = ep_end  # ep_end == lengths[ep_idx] in variable mode
+
+            if start >= ep_len - self.frameskip:
+                # frameskip would collapse this window to 1 frame, so explicitly
+                # load [start] and [ep_len-1] as the two frames.
+                steps_a = self._load_slice(ep_idx, start, start + 1)
+                steps_b = self._load_slice(ep_idx, ep_len - 1, ep_len)
+                steps = {
+                    k: torch.cat([steps_a[k], steps_b[k]], dim=0)
+                    if isinstance(steps_a[k], torch.Tensor) and steps_a[k].ndim > 0
+                    else steps_a[k]
+                    for k in steps_a
+                }
+                valid_steps = 2
+            else:
+                # Normal case: take up to `span` frames from start, capped at ep boundary.
+                end = min(start + self.span, ep_len)
+                steps = self._load_slice(ep_idx, start, end)
+                first_key = next(iter(steps))
+                valid_steps = steps[first_key].shape[0]
+
+            # Pad to num_steps and attach mask.
+            pad_len = self.num_steps - valid_steps
+            padding_mask = torch.ones(self.num_steps, dtype=torch.bool)
+            if pad_len > 0:
+                padding_mask[valid_steps:] = False
+                for k, v in steps.items():
+                    if isinstance(v, torch.Tensor):
+                        pad = torch.zeros((pad_len, *v.shape[1:]), dtype=v.dtype)
+                        steps[k] = torch.cat([v, pad], dim=0)
+            steps['padding_mask'] = padding_mask
+            steps['valid_steps'] = torch.tensor(valid_steps, dtype=torch.long)
+
         if 'action' in steps:
             steps['action'] = steps['action'].reshape(self.num_steps, -1)
+
+        if self.transform is not None:
+            steps = self.transform(steps)
+
         return steps
 
     def load_chunk(
