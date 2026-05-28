@@ -122,9 +122,6 @@ class Dataset:
         if 'action' in steps:
             steps['action'] = steps['action'].reshape(self.num_steps, -1)
 
-        if self.transform is not None:
-            steps = self.transform(steps)
-
         return steps
 
     def load_chunk(
