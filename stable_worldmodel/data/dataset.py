@@ -42,26 +42,67 @@ class Dataset:
         transform: Callable[[dict], dict] | None = None,
         fixed_step_size: bool = True,
         pad_with_last: bool = True,
+        filter_by_goal: dict | None = None,
     ) -> None:
-        self.lengths = lengths
-        self.offsets = offsets
+        self.lengths = np.array(lengths)
+        self.offsets = np.array(offsets)
         self.frameskip = frameskip
         self.num_steps = num_steps
         self.span = num_steps * frameskip
         self.transform = transform
         self.fixed_step_size = fixed_step_size
         self.pad_with_last = pad_with_last
+        self.filter_by_goal = filter_by_goal
+
+        if filter_by_goal is not None:
+            required_keys = list(filter_by_goal.keys())
+            valid_ep_indices = [i for i, l in enumerate(self.lengths) if l > 0]
+            last_step_global_indices = [
+                self.offsets[ep_idx] + self.lengths[ep_idx] - 1
+                for ep_idx in valid_ep_indices
+            ]
+            
+            all_step_data = self.get_row_data(last_step_global_indices, keys=required_keys)
+            valid_indices = []
+            
+            for i, ep_idx in enumerate(valid_ep_indices):
+                is_valid = True
+                for key, conditions in filter_by_goal.items():
+                    val = all_step_data[key][i]
+                    if isinstance(val, torch.Tensor):
+                        val = val.cpu().numpy()
+                        
+                    thresholds = conditions.get('threshold', [])
+                    goals = conditions.get('goal_values', [])
+                    
+                    for j, (t, g) in enumerate(zip(thresholds, goals)):
+                        if t is None or g is None: continue
+                        import math
+                        if isinstance(t, float) and math.isnan(t): continue
+                        if isinstance(g, float) and math.isnan(g): continue
+                        if abs(val[j] - g) > t:
+                            is_valid = False
+                            break
+                    if not is_valid:
+                        break
+                if is_valid:
+                    valid_indices.append(ep_idx)
+            
+            self.lengths = self.lengths[valid_indices]
+            self.offsets = self.offsets[valid_indices]
+            print(f"filter_by_goal: kept {len(valid_indices)} out of {len(lengths)} episodes.")
+
         if fixed_step_size:
             self.clip_indices = [
                 (ep, start, start + self.span)
-                for ep, length in enumerate(lengths)
+                for ep, length in enumerate(self.lengths)
                 if length >= self.span
                 for start in range(length - self.span + 1)
             ]
         else:
             self.clip_indices = [
                 (ep, start, length)
-                for ep, length in enumerate(lengths)
+                for ep, length in enumerate(self.lengths)
                 for start in range(length-1)
             ]
 
@@ -152,7 +193,7 @@ class Dataset:
     def get_dim(self, col: str) -> int:
         raise NotImplementedError
 
-    def get_row_data(self, row_idx: int | list[int]) -> dict:
+    def get_row_data(self, row_idx: int | list[int], keys: list[str] | None = None) -> dict:
         raise NotImplementedError
 
     def merge_col(
@@ -236,13 +277,17 @@ class MergeDataset:
                 return ds.get_col_data(col)
         raise KeyError(col)
 
-    def get_row_data(self, row_idx: int | list[int]) -> dict:
+    def get_row_data(self, row_idx: int | list[int], keys: list[str] | None = None) -> dict:
         out = {}
-        for ds, keys in zip(self.datasets, self.keys_map):
-            data = ds.get_row_data(row_idx)
-            for k in keys:
-                if k in data:
-                    out[k] = data[k]
+        for ds, ds_keys in zip(self.datasets, self.keys_map):
+            if keys is not None:
+                sub_keys = [k for k in keys if k in ds_keys]
+                if not sub_keys:
+                    continue
+            else:
+                sub_keys = ds_keys
+            data = ds.get_row_data(row_idx, keys=sub_keys)
+            out.update(data)
         return out
 
 
@@ -319,15 +364,15 @@ class ConcatDataset:
             raise KeyError(col)
         return np.concatenate(data)
 
-    def get_row_data(self, row_idx: int | list[int]) -> dict:
+    def get_row_data(self, row_idx: int | list[int], keys: list[str] | None = None) -> dict:
         if isinstance(row_idx, int):
             ds_idx, local_idx = self._loc(row_idx)
-            return self.datasets[ds_idx].get_row_data(local_idx)
+            return self.datasets[ds_idx].get_row_data(local_idx, keys=keys)
 
         results: dict[str, list[Any]] = {}
         for idx in row_idx:
             ds_idx, local_idx = self._loc(idx)
-            row = self.datasets[ds_idx].get_row_data(local_idx)
+            row = self.datasets[ds_idx].get_row_data(local_idx, keys=keys)
             for k, v in row.items():
                 if k not in results:
                     results[k] = []

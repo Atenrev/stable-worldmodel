@@ -37,6 +37,7 @@ class HDF5Dataset(Dataset):
         cache_dir: str | Path | None = None,
         path: str | Path | None = None,
         fixed_step_size: bool = True,
+        filter_by_goal: dict | None = None,
     ) -> None:
         if path is not None:
             self.h5_path = Path(path)
@@ -59,7 +60,7 @@ class HDF5Dataset(Dataset):
                 self._cache[key] = f[key][:]
                 logging.info(f"Cached '{key}' from '{self.h5_path}'")
 
-        super().__init__(lengths, offsets, frameskip, num_steps, transform, fixed_step_size)
+        super().__init__(lengths, offsets, frameskip, num_steps, transform, fixed_step_size, filter_by_goal=filter_by_goal)
 
         if keys_to_merge:
             for target, source in keys_to_merge.items():
@@ -120,9 +121,10 @@ class HDF5Dataset(Dataset):
     def get_col_data(self, col: str) -> np.ndarray:
         return self._get_col(col)
 
-    def get_row_data(self, row_idx: int | list[int]) -> dict:
+    def get_row_data(self, row_idx: int | list[int], keys: list[str] | None = None) -> dict:
         self._open()
-        return {col: self.h5_file[col][row_idx] for col in self._keys}
+        keys = keys or self._keys
+        return {col: self.h5_file[col][row_idx] for col in keys}
 
     def merge_col(
         self,
