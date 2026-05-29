@@ -155,10 +155,12 @@ class Dataset:
             padding_mask = torch.ones(self.num_steps, dtype=torch.bool)
             if pad_len > 0:
                 padding_mask[valid_steps:] = False
+                pad_step = self._load_slice(ep_idx, ep_len - 1, ep_len)
                 for k, v in steps.items():
                     if isinstance(v, torch.Tensor):
                         if self.pad_with_last:
-                            last_step = v[valid_steps - 1 : valid_steps]
+                            #last_step = v[valid_steps - 1 : valid_steps]
+                            last_step = pad_step[k]
                             pad = last_step.repeat(pad_len, *[1] * (v.ndim - 1))
                         else:
                             pad = torch.zeros((pad_len, *v.shape[1:]), dtype=v.dtype)
