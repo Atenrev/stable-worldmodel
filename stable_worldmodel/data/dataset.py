@@ -41,6 +41,7 @@ class Dataset:
         num_steps: int = 1,
         transform: Callable[[dict], dict] | None = None,
         fixed_step_size: bool = True,
+        pad_with_last: bool = True,
     ) -> None:
         self.lengths = lengths
         self.offsets = offsets
@@ -49,6 +50,7 @@ class Dataset:
         self.span = num_steps * frameskip
         self.transform = transform
         self.fixed_step_size = fixed_step_size
+        self.pad_with_last = pad_with_last
         if fixed_step_size:
             self.clip_indices = [
                 (ep, start, start + self.span)
@@ -114,7 +116,11 @@ class Dataset:
                 padding_mask[valid_steps:] = False
                 for k, v in steps.items():
                     if isinstance(v, torch.Tensor):
-                        pad = torch.zeros((pad_len, *v.shape[1:]), dtype=v.dtype)
+                        if self.pad_with_last:
+                            last_step = v[valid_steps - 1 : valid_steps]
+                            pad = last_step.repeat(pad_len, *[1] * (v.ndim - 1))
+                        else:
+                            pad = torch.zeros((pad_len, *v.shape[1:]), dtype=v.dtype)
                         steps[k] = torch.cat([v, pad], dim=0)
             steps['padding_mask'] = padding_mask
             steps['valid_steps'] = torch.tensor(valid_steps, dtype=torch.long)
