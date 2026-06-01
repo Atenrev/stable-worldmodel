@@ -432,6 +432,11 @@ class WorldModelPolicy(BasePolicy):
                 else:
                     sliced[k] = v
 
+            # Pass slot indices and flush signal to solver
+            sliced['_slot_idx'] = idx_tensor
+            if needs_flush is not None:
+                sliced['_needs_flush'] = needs_flush[replan_idx]
+
             sliced_init = (
                 self._next_init[idx_tensor]
                 if self._next_init is not None
