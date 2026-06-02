@@ -173,6 +173,7 @@ class World:
         goal_offset: int | None = None,
         eval_budget: int | None = None,
         callables: list[dict] | None = None,
+        use_random_init: bool = False,
     ) -> dict:
         """Run the attached policy and return aggregated metrics.
 
@@ -225,6 +226,7 @@ class World:
                 callables,
                 video,
                 mode,
+                use_random_init,
             )
         mode = reset_mode or 'auto'
         return self._evaluate(episodes, seed, options, video, mode, eval_budget)
@@ -452,6 +454,7 @@ class World:
         callables,
         video,
         mode,
+        use_random_init: bool = False,
     ) -> dict:
         n = len(episodes_idx)
         assert n == self.num_envs
@@ -465,7 +468,7 @@ class World:
 
         self.reset(seed=init_state.get('seed'))
 
-        if callables:
+        if callables and not use_random_init:
             merged = {**init_state, **goal_state}
             for i in range(n):
                 env_init = {k: v[i] for k, v in merged.items()}
@@ -474,8 +477,12 @@ class World:
                 )
 
         shape_prefix = self.infos['pixels'].shape[:2]
+        
+        state_sources = [(goal_state, '')]
+        if not use_random_init:
+            state_sources.insert(0, (init_state, ''))
 
-        for src, dst_prefix in [(init_state, ''), (goal_state, '')]:
+        for src, dst_prefix in state_sources:
             for k, v in src.items():
                 key = dst_prefix + k if dst_prefix else k
                 if key in self.infos or key in goal_state:
