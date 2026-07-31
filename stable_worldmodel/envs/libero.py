@@ -24,10 +24,13 @@ class Libero(gym.Env):
         self._vec_env = None
         self.task_index = None
         self.relative_idx = None
+        self.camera_view = kwargs.get("camera_view", "agentview")
         
         self.action_space = spaces.Box(-1.0, 1.0, (7,), dtype=np.float32)
+        # Handle camera view width adjustment
+        width = 512 if self.camera_view == "both" else 256
         self.observation_space = spaces.Dict({
-            "pixels": spaces.Box(0, 255, (256, 256, 3), dtype=np.uint8)
+            "pixels": spaces.Box(0, 255, (256, width, 3), dtype=np.uint8)
         })
 
     def _create_env(self, task_index):
@@ -162,7 +165,17 @@ class Libero(gym.Env):
         
     def _process_obs(self, obs):
         if "pixels" in obs and isinstance(obs["pixels"], dict):
-            obs["pixels"] = obs["pixels"]["image"]
+            if self.camera_view == "cam-on-hand":
+                obs["pixels"] = obs["pixels"]["image2"]
+            elif self.camera_view == "both":
+                img1 = obs["pixels"]["image"]
+                img2 = obs["pixels"]["image2"]
+                if isinstance(img1, torch.Tensor):
+                    obs["pixels"] = torch.cat([img1, img2], dim=-1)
+                else:
+                    obs["pixels"] = np.concatenate([img1, img2], axis=-1)
+            else:
+                obs["pixels"] = obs["pixels"]["image"]
         elif "image" in obs:
             obs["pixels"] = obs["image"]
         
@@ -195,12 +208,23 @@ class Libero(gym.Env):
         return obs_out
 
     def render(self):
-        if hasattr(self._vec_env.envs[0].unwrapped, "render"):
-            img = self._vec_env.envs[0].unwrapped.render()
-            if img is not None:
-                img = np.ascontiguousarray(img)
-                return img
-        return None
+        if self._vec_env is None:
+            return None
+        unwrapped = self._vec_env.envs[0].unwrapped
+        raw_obs = unwrapped._env.env._get_observations()
+        formatted_pixels = unwrapped._format_raw_obs(raw_obs)["pixels"]
+        
+        if self.camera_view == "cam-on-hand":
+            img = formatted_pixels["image2"]
+        elif self.camera_view == "both":
+            img1 = formatted_pixels["image"]
+            img2 = formatted_pixels["image2"]
+            img = np.concatenate([img1, img2], axis=1)
+        else:
+            img = formatted_pixels["image"]
+            
+        img = img[::-1, ::-1]  # flip both H and W for visualization
+        return np.ascontiguousarray(img)
         
     def close(self):
         if self._vec_env is not None:

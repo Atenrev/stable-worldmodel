@@ -140,6 +140,19 @@ class LeRobotAdapter(Dataset):
 
         super().__init__(lengths, offsets, frameskip, num_steps, transform)
 
+    def __getitem__(self, idx: int) -> dict:
+        max_attempts = 10
+        current_idx = idx
+        for attempt in range(max_attempts):
+            try:
+                return super().__getitem__(current_idx)
+            except Exception as e:
+                import random
+                print(f"[Warning] Failed to load sample at index {current_idx} in LeRobotAdapter (attempt {attempt + 1}/{max_attempts}): {e}")
+                current_idx = random.randint(0, len(self) - 1)
+        return super().__getitem__(idx)
+
+
     @property
     def column_names(self) -> list[str]:
         return self._keys
