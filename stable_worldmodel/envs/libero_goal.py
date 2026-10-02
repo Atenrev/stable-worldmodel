@@ -26,7 +26,22 @@ Success (``terminated``) means the scene matches the goal snapshot:
   (``obj_threshold`` m), drawers by slide position (``slide_threshold`` m),
   the stove knob by angle (``hinge_threshold`` rad).
 
-``objects_only_success`` ignores the end-effector. The info dict also reports
+``objects_only_success`` ignores the end-effector.
+
+Two details matter for matching LeRobot LIBERO datasets (checked against
+``Atenrev/libero-goal-smolvla-20k``):
+
+* Fixture placement (stove, cabinet, rack) is sampled at ``reset`` from
+  ``np.random`` after ``env.seed(seed)`` and lives in the MuJoCo *model*
+  (``body_pos`` / ``body_quat``), not in the state. Snapshots therefore carry
+  ``body_pos`` / ``body_quat``; with the capture seed the renders match the
+  dataset frames before video compression.
+* Dataset frames went through H.264 (libx264, crf 30, GOP 2, yuv420p).
+  ``obs_codec='h264'`` passes every observation through the same codec
+  (``h264_roundtrip``: the last ``codec_window`` frames plus ``codec_pad``
+  repeats of the current one as stand-in future frames, then the current
+  decoded frame), which brings the WMs' latents of renders much closer to
+  those of the dataset frames they were trained on. The info dict also reports
 the continuous distances and ``task_success`` (the BDDL predicate).
 """
 
@@ -40,6 +55,36 @@ from gymnasium import spaces
 
 
 ROBOT_PREFIXES = ('robot0_', 'gripper0_', 'mount0_')
+
+
+def h264_roundtrip(frames, pad: int = 8, crf: int = 30, gop: int = 2) -> np.ndarray:
+    """Encode ``frames`` (+ ``pad`` copies of the last one) with libx264 and return the decoded last real frame.
+
+    Mimics LeRobot's dataset video encoding (``h264``, ``crf``, ``g``, ``yuv420p``) for an online stream:
+    x264's rate control looks ahead, so the current frame is followed by repeats of itself.
+    """
+    import io
+
+    import av
+
+    frames = [np.ascontiguousarray(f) for f in frames]
+    seq = frames + [frames[-1]] * pad
+    h, w = frames[-1].shape[:2]
+    buf = io.BytesIO()
+    with av.open(buf, 'w', format='mp4') as c:
+        s = c.add_stream('h264', 20, options={'g': str(gop), 'crf': str(crf)})
+        s.pix_fmt, s.width, s.height = 'yuv420p', w, h
+        for f in seq:
+            for p in s.encode(av.VideoFrame.from_ndarray(f, format='rgb24')):
+                c.mux(p)
+        for p in s.encode():
+            c.mux(p)
+    buf.seek(0)
+    with av.open(buf) as c:
+        for i, fr in enumerate(c.decode(video=0)):
+            if i == len(frames) - 1:
+                return fr.to_ndarray(format='rgb24')
+    raise RuntimeError('h264 roundtrip returned too few frames')
 
 
 def _quat2axisangle(quat: np.ndarray) -> np.ndarray:
@@ -67,6 +112,10 @@ class LiberoGoal(gym.Env):
         obj_threshold: float = 0.03,
         slide_threshold: float = 0.02,
         hinge_threshold: float = 0.2,
+        obs_codec: str | None = 'h264',
+        codec_window: int = 8,
+        codec_pad: int = 8,
+        codec_crf: int = 30,
         render_mode: str = 'rgb_array',
         **kwargs,
     ):
@@ -83,6 +132,11 @@ class LiberoGoal(gym.Env):
             hinge=hinge_threshold,
         )
         self.render_mode = render_mode
+        assert obs_codec in (None, 'none', 'h264'), obs_codec
+        self.obs_codec = None if obs_codec == 'none' else obs_codec
+        self.codec_window, self.codec_pad, self.codec_crf = codec_window, codec_pad, codec_crf
+        self._hist = {'agent': [], 'wrist': []}
+        self._cur = None  # (agent, wrist) processed images of the current observation
 
         self._suite = None
         self._env = None
@@ -168,9 +222,16 @@ class LiberoGoal(gym.Env):
             'sim_state': self.sim.get_state().flatten().copy(),
             'gripper_action': np.asarray(self._gripper.current_action, dtype=np.float64).copy(),
             'qacc_warmstart': self.sim.data.qacc_warmstart.copy(),
+            'body_pos': self.sim.model.body_pos.flatten().copy(),
+            'body_quat': self.sim.model.body_quat.flatten().copy(),
         }
 
-    def _restore(self, sim_state, gripper_action=None, qacc_warmstart=None):
+    def _restore(self, sim_state, gripper_action=None, qacc_warmstart=None, body_pos=None, body_quat=None):
+        model = self.sim.model
+        if body_pos is not None:  # fixture placement lives in the model, not the state
+            model.body_pos[:] = np.asarray(body_pos, dtype=np.float64).reshape(-1)[: model.nbody * 3].reshape(-1, 3)
+        if body_quat is not None:
+            model.body_quat[:] = np.asarray(body_quat, dtype=np.float64).reshape(-1)[: model.nbody * 4].reshape(-1, 4)
         sim_state = np.asarray(sim_state, dtype=np.float64).reshape(-1)
         n = len(self.sim.get_state().flatten())
         sim_state = sim_state[:n]
@@ -181,8 +242,26 @@ class LiberoGoal(gym.Env):
             self.sim.data.qacc_warmstart[:] = np.asarray(qacc_warmstart, dtype=np.float64).reshape(-1)[: self.sim.model.nv]
         self._env.env.timestep = 0
         self._env.env.done = False
-        self._last_obs = obs
+        self._set_obs(obs, reset_history=True)
         return obs
+
+    def _set_obs(self, obs, reset_history=False):
+        """Make ``obs`` current: rotate the cameras 180deg and (optionally) pass them through the video codec."""
+        self._last_obs = obs
+        raw = {
+            'agent': np.ascontiguousarray(obs['agentview_image'][::-1, ::-1]),
+            'wrist': np.ascontiguousarray(obs['robot0_eye_in_hand_image'][::-1, ::-1]),
+        }
+        out = {}
+        for view, img in raw.items():
+            if reset_history:
+                self._hist[view] = []
+            self._hist[view] = (self._hist[view] + [img])[-self.codec_window:]
+            if self.obs_codec == 'h264' and (view == 'agent' or self.camera_view == 'both'):
+                out[view] = h264_roundtrip(self._hist[view], pad=self.codec_pad, crf=self.codec_crf)
+            else:
+                out[view] = img
+        self._cur = (out['agent'], out['wrist'])
 
     def _scene(self, obs) -> dict:
         qpos = self.sim.data.qpos
@@ -191,15 +270,15 @@ class LiberoGoal(gym.Env):
             'joints': {name: qpos[s].copy() for name, _, s in self._joints},
         }
 
-    def _images(self, obs):
-        agent = np.ascontiguousarray(obs['agentview_image'][::-1, ::-1])
-        wrist = np.ascontiguousarray(obs['robot0_eye_in_hand_image'][::-1, ::-1])
-        return agent, wrist
+    def _images(self, obs=None):
+        """Processed (rotated, optionally codec-roundtripped) agent and wrist images of the current observation."""
+        return self._cur
 
-    def _set_goal_state(self, goal_state, goal_gripper_action=None, goal_qacc_warmstart=None):
+    def _set_goal_state(self, goal_state, goal_gripper_action=None, goal_qacc_warmstart=None,
+                        goal_body_pos=None, goal_body_quat=None):
         """Load the goal snapshot, record its scene and images, then restore the current state."""
         current = self.get_snapshot() if self._env is not None else None
-        obs = self._restore(goal_state, goal_gripper_action, goal_qacc_warmstart)
+        obs = self._restore(goal_state, goal_gripper_action, goal_qacc_warmstart, goal_body_pos, goal_body_quat)
         agent, wrist = self._images(obs)
         self._goal = {
             **self._scene(obs),
@@ -210,8 +289,8 @@ class LiberoGoal(gym.Env):
         if current is not None:
             self._restore(**current)
 
-    def _set_state(self, state, gripper_action=None, qacc_warmstart=None):
-        self._restore(state, gripper_action, qacc_warmstart)
+    def _set_state(self, state, gripper_action=None, qacc_warmstart=None, body_pos=None, body_quat=None):
+        self._restore(state, gripper_action, qacc_warmstart, body_pos, body_quat)
 
     # --------------------------------------------------------------- metrics
     def eval_state(self) -> dict:
@@ -286,24 +365,23 @@ class LiberoGoal(gym.Env):
             obs, _, _, _ = self._env.step(noop)
         self._env.env.timestep = 0
         self._goal = None
-        self._last_obs = obs
+        self._set_obs(obs, reset_history=True)
         out, info, _ = self._obs_info(obs)
         return out, info
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=np.float64).reshape(-1), -1.0, 1.0)
         obs, _, _, _ = self._env.step(action)
-        self._last_obs = obs
+        self._set_obs(obs)
         out, info, metrics = self._obs_info(obs)
         terminated = bool(metrics.get('state_success', False))
         reward = -float(metrics.get('eef_dist', 0.0) + metrics.get('obj_dist', 0.0))
         return out, reward, terminated, False, info
 
     def render(self):
-        if self._last_obs is None:
+        if self._cur is None:
             return np.zeros((self.resolution, self.resolution, 3), np.uint8)
-        agent, _ = self._images(self._last_obs)
-        return agent
+        return self._cur[0]
 
     def close(self):
         if self._env is not None:
