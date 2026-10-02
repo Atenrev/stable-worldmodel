@@ -25,6 +25,9 @@ class CEMSolver:
         topk: Number of elite samples to keep for distribution update.
         device: Device for tensor computations.
         seed: Random seed for reproducibility.
+        sample_chunk: If set, candidates are scored in chunks of this many
+            samples per ``get_cost`` call (bounds peak memory for large
+            world models; the result is unchanged).
     """
 
     def __init__(
@@ -38,8 +41,10 @@ class CEMSolver:
         device: str | torch.device = 'cpu',
         seed: int = 1234,
         callbacks: list[Callback] | None = None,
+        sample_chunk: int | None = None,
     ) -> None:
         self.model = model
+        self.sample_chunk = sample_chunk
         self.batch_size = batch_size
         self.var_scale = var_scale
         self.num_samples = num_samples
@@ -52,6 +57,20 @@ class CEMSolver:
             self._dtype = next(model.parameters()).dtype
         except (AttributeError, StopIteration):
             self._dtype = torch.float32
+
+    def _score(self, infos: dict, candidates: torch.Tensor) -> torch.Tensor:
+        n = candidates.shape[1]
+        if not self.sample_chunk or self.sample_chunk >= n:
+            return self.model.get_cost(infos, candidates)
+        costs = []
+        for s0 in range(0, n, self.sample_chunk):
+            s1 = min(s0 + self.sample_chunk, n)
+            sub = {
+                k: (v[:, s0:s1] if torch.is_tensor(v) or isinstance(v, np.ndarray) else v)
+                for k, v in infos.items()
+            }
+            costs.append(self.model.get_cost(sub, candidates[:, s0:s1]))
+        return torch.cat(costs, dim=1)
 
     def configure(
         self, *, action_space: gym.Space, n_envs: int, config: Any
@@ -196,7 +215,7 @@ class CEMSolver:
                 candidates[:, 0] = batch_mean
 
                 # Evaluate candidates
-                costs = self.model.get_cost(expanded_infos, candidates)
+                costs = self._score(expanded_infos, candidates)
 
                 assert isinstance(costs, torch.Tensor), (
                     f'Expected cost to be a torch.Tensor, got {type(costs)}'

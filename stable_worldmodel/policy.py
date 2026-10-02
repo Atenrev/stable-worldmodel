@@ -1,3 +1,4 @@
+import re
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -506,8 +507,18 @@ def _load_model_with_attribute(run_name, attribute_name, cache_dir=None):
 
     if run_path.is_dir():
         ckpt_files = list(run_path.glob('*_object.ckpt'))
-        ckpt_files.sort(key=lambda x: x.stat().st_ctime, reverse=True)
+        assert ckpt_files, f'No *_object.ckpt in {run_path}'
+
+        def _order(p):
+            # newest epoch first ('..._epoch_<N>_object.ckpt'); ctime as a tie-break
+            m = re.search(r'_epoch_(\d+)', p.name)
+            return (int(m.group(1)) if m else -1, p.stat().st_ctime)
+
+        ckpt_files.sort(key=_order, reverse=True)
         path = ckpt_files[0]
+        logging.info(f'Loading model from checkpoint: {path}')
+    elif run_path.name.endswith('_object.ckpt'):
+        path = run_path
         logging.info(f'Loading model from checkpoint: {path}')
     else:
         path = Path(f'{run_path}_object.ckpt')

@@ -126,6 +126,11 @@ register(
     entry_point='stable_worldmodel.envs.libero:Libero',
 )
 
+register(
+    id='swm/LiberoGoal-v0',
+    entry_point='stable_worldmodel.envs.libero_goal:LiberoGoal',
+)
+
 _GYM_CONTROL = 'stable_worldmodel.envs.gymnasium_control'
 register(
     id='swm/CartPoleControl-v1',

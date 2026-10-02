@@ -174,6 +174,7 @@ class World:
         eval_budget: int | None = None,
         callables: list[dict] | None = None,
         use_random_init: bool = False,
+        info_metrics: list[str] | None = None,
     ) -> dict:
         """Run the attached policy and return aggregated metrics.
 
@@ -210,6 +211,11 @@ class World:
                 'in_dataset': bool}}}``; if ``in_dataset`` is True, the
                 ``value`` names a key in the sliced dataset state and the
                 per-env value is deep-copied in.
+            info_metrics: Dataset mode only. Info keys reported per episode
+                in ``results['info_metrics']``: the value at the episode's
+                last step (an env frozen at success keeps its terminal
+                value) and, for boolean keys, ``<key>_any`` (true at any
+                step).
 
         Returns:
             A dict with ``'success_rate'`` (percent), ``'episode_successes'``
@@ -227,6 +233,7 @@ class World:
                 video,
                 mode,
                 use_random_init,
+                info_metrics,
             )
         mode = reset_mode or 'auto'
         return self._evaluate(episodes, seed, options, video, mode, eval_budget)
@@ -455,6 +462,7 @@ class World:
         video,
         mode,
         use_random_init: bool = False,
+        info_metrics: list[str] | None = None,
     ) -> dict:
         n = len(episodes_idx)
         assert n == self.num_envs
@@ -526,10 +534,16 @@ class World:
             'seeds': init_state.get('seed'),
         }
         frames: dict[int, list] = defaultdict(list) if video else None
+        metric_keys = [k for k in (info_metrics or []) if k in self.infos]
+        ever: dict[str, np.ndarray] = {}
 
         def on_step(world):
             world.infos.update(deepcopy(goal_snapshot))
             results['episode_successes'] |= world.terminateds
+            for k in metric_keys:
+                v = np.asarray(world.infos[k]).reshape(n, -1)[:, -1]
+                if v.dtype == bool:
+                    ever[k] = ever.get(k, np.zeros(n, dtype=bool)) | v
             if frames is not None:
                 for i in range(world.num_envs):
                     f = world.infos['pixels'][i]
@@ -541,6 +555,13 @@ class World:
         results['success_rate'] = (
             float(results['episode_successes'].sum()) / n * 100.0
         )
+        if metric_keys:
+            results['info_metrics'] = {
+                k: np.asarray(self.infos[k]).reshape(n, -1)[:, -1].copy()
+                for k in metric_keys
+            }
+            for k, v in ever.items():
+                results['info_metrics'][f'{k}_any'] = v
         if frames:
             Path(video).mkdir(parents=True, exist_ok=True)
             for env_idx, f in frames.items():
