@@ -144,6 +144,7 @@ class LiberoGoal(gym.Env):
         self._task_id_default = int(task_id)
 
         self._goal = None  # goal snapshot summary (dict)
+        self._start_dist = None
         self._last_obs = None
 
         self.action_space = spaces.Box(-1.0, 1.0, (7,), dtype=np.float32)
@@ -186,6 +187,7 @@ class LiberoGoal(gym.Env):
         self._init_states = self._benchmark().get_task_init_states(task_id)
         self._joints = self._object_joints()
         self._goal = None
+        self._start_dist = None
 
     def _object_joints(self):
         """(name, kind, qpos_slice) for every non-robot joint (objects, drawers, knobs)."""
@@ -291,6 +293,9 @@ class LiberoGoal(gym.Env):
 
     def _set_state(self, state, gripper_action=None, qacc_warmstart=None, body_pos=None, body_quat=None):
         self._restore(state, gripper_action, qacc_warmstart, body_pos, body_quat)
+        # distances of the start state to the goal = the 'do nothing' baseline
+        m = self.eval_state()
+        self._start_dist = {k: m[k] for k in ('eef_dist', 'obj_dist', 'slide_dist', 'hinge_dist')} if m else None
 
     # --------------------------------------------------------------- metrics
     def eval_state(self) -> dict:
@@ -314,7 +319,10 @@ class LiberoGoal(gym.Env):
                 max_hinge = max(max_hinge, d)
                 art_ok &= d < th['hinge']
         objects_only = bool(obj_ok and art_ok)
+        start = getattr(self, '_start_dist', None) or {}
         return {
+            'start_eef_dist': start.get('eef_dist', np.nan),
+            'start_obj_dist': start.get('obj_dist', np.nan),
             'eef_dist': eef_dist,
             'obj_dist': obj_dist,
             'slide_dist': max_slide,
@@ -344,7 +352,7 @@ class LiberoGoal(gym.Env):
             else np.zeros((self.resolution, self.resolution, 3), np.uint8)
         )
         metrics = self.eval_state()
-        for k in ('eef_dist', 'obj_dist', 'slide_dist', 'hinge_dist'):
+        for k in ('eef_dist', 'obj_dist', 'slide_dist', 'hinge_dist', 'start_eef_dist', 'start_obj_dist'):
             info[k] = np.float32(metrics.get(k, np.nan))
         for k in ('state_success', 'objects_only_success', 'task_success', 'goal_task_success'):
             info[k] = bool(metrics.get(k, False))
