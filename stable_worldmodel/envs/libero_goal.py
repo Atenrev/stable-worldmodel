@@ -57,11 +57,14 @@ from gymnasium import spaces
 ROBOT_PREFIXES = ('robot0_', 'gripper0_', 'mount0_')
 
 
-def h264_roundtrip(frames, pad: int = 8, crf: int = 30, gop: int = 2) -> np.ndarray:
+def h264_roundtrip(frames, pad: int = 8, crf: int = 30, gop: int = 2, threads: int | None = None) -> np.ndarray:
     """Encode ``frames`` (+ ``pad`` copies of the last one) with libx264 and return the decoded last real frame.
 
     Mimics LeRobot's dataset video encoding (``h264``, ``crf``, ``g``, ``yuv420p``) for an online stream:
     x264's rate control looks ahead, so the current frame is followed by repeats of itself.
+    ``threads``: x264 slice-thread count (None = FFmpeg's auto, ~1.5x the host's cores). For 256x256 frames any
+    value >= 4 gives bit-identical output to auto (checked), and a fixed 4 keeps processes that also run
+    DataLoader workers under the per-host thread cap on Condor.
     """
     import io
 
@@ -73,6 +76,8 @@ def h264_roundtrip(frames, pad: int = 8, crf: int = 30, gop: int = 2) -> np.ndar
     buf = io.BytesIO()
     with av.open(buf, 'w', format='mp4') as c:
         s = c.add_stream('h264', 20, options={'g': str(gop), 'crf': str(crf)})
+        if threads is not None:
+            s.codec_context.thread_count = int(threads)
         s.pix_fmt, s.width, s.height = 'yuv420p', w, h
         for f in seq:
             for p in s.encode(av.VideoFrame.from_ndarray(f, format='rgb24')):
@@ -116,6 +121,7 @@ class LiberoGoal(gym.Env):
         codec_window: int = 8,
         codec_pad: int = 8,
         codec_crf: int = 30,
+        codec_threads: int | None = None,
         render_mode: str = 'rgb_array',
         **kwargs,
     ):
@@ -135,6 +141,7 @@ class LiberoGoal(gym.Env):
         assert obs_codec in (None, 'none', 'h264'), obs_codec
         self.obs_codec = None if obs_codec == 'none' else obs_codec
         self.codec_window, self.codec_pad, self.codec_crf = codec_window, codec_pad, codec_crf
+        self.codec_threads = codec_threads
         self._hist = {'agent': [], 'wrist': []}
         self._cur = None  # (agent, wrist) processed images of the current observation
 
@@ -260,7 +267,8 @@ class LiberoGoal(gym.Env):
                 self._hist[view] = []
             self._hist[view] = (self._hist[view] + [img])[-self.codec_window:]
             if self.obs_codec == 'h264' and (view == 'agent' or self.camera_view == 'both'):
-                out[view] = h264_roundtrip(self._hist[view], pad=self.codec_pad, crf=self.codec_crf)
+                out[view] = h264_roundtrip(self._hist[view], pad=self.codec_pad, crf=self.codec_crf,
+                                           threads=self.codec_threads)
             else:
                 out[view] = img
         self._cur = (out['agent'], out['wrist'])
