@@ -60,9 +60,22 @@ def _column_to_numpy(column: Any) -> np.ndarray:
         return column.detach().cpu().numpy()
     if isinstance(column, np.ndarray):
         return column
+    if hasattr(column, "to_numpy"):
+        try:
+            return column.to_numpy()
+        except Exception:
+            pass
+    if hasattr(column, "to_pylist") or type(column).__name__ == "Column":
+        try:
+            return np.asarray(column)
+        except Exception:
+            pass
     if isinstance(column, list):
+        if len(column) > 0 and isinstance(column[0], (int, float, bool, np.number)):
+            return np.asarray(column)
         return np.asarray([_scalarize(v) for v in column])
     return np.asarray(column)
+
 
 
 class LeRobotAdapter(Dataset):
@@ -227,13 +240,12 @@ class LeRobotAdapter(Dataset):
         absolute_episode_index: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         abs_ids = absolute_episode_index.astype(np.int64)
-        unique_abs, first_idx = np.unique(abs_ids, return_index=True)
+        unique_abs, first_idx, counts = np.unique(
+            abs_ids, return_index=True, return_counts=True
+        )
         order = np.argsort(first_idx)
         absolute_episode_ids = unique_abs[order]
-        counts = np.array(
-            [(abs_ids == ep_id).sum() for ep_id in absolute_episode_ids],
-            dtype=np.int64,
-        )
+        counts = counts[order]
 
         local_map = {
             int(abs_id): idx for idx, abs_id in enumerate(absolute_episode_ids)
@@ -243,14 +255,11 @@ class LeRobotAdapter(Dataset):
             dtype=np.int64,
         )
 
-        step_idx = np.empty_like(local_episode_index)
-        for local_ep in range(len(absolute_episode_ids)):
-            mask = local_episode_index == local_ep
-            step_idx[mask] = np.arange(mask.sum(), dtype=np.int64)
-
         offsets = np.zeros(len(counts), dtype=np.int64)
         if len(counts) > 1:
             offsets[1:] = np.cumsum(counts[:-1])
+
+        step_idx = np.arange(len(abs_ids), dtype=np.int64) - np.repeat(offsets, counts)
 
         return (
             local_episode_index,
@@ -259,6 +268,7 @@ class LeRobotAdapter(Dataset):
             offsets,
             absolute_episode_ids.astype(np.int64),
         )
+
 
     def _get_native_column(self, native_key: str) -> np.ndarray:
         if native_key not in self._full_columns:
@@ -381,6 +391,53 @@ class LeRobotAdapter(Dataset):
     def get_dim(self, col: str) -> int:
         data = self.get_col_data(col)
         return np.prod(data.shape[1:]).item() if data.ndim > 1 else 1
+
+    def get_stats(self, col: str) -> dict[str, np.ndarray] | None:
+        """Returns pre-computed column statistics (mean, std, min, max, count) if available."""
+        native_key = self._alias_to_native.get(col, col)
+
+        # 1. Try dataset.meta.stats
+        meta_stats = getattr(self.dataset.meta, "stats", None)
+        if meta_stats and native_key in meta_stats:
+            s = meta_stats[native_key]
+            if "mean" in s and "std" in s:
+                count = s.get("count", [1])
+                count_val = count[0] if isinstance(count, (list, np.ndarray)) else count
+                return {
+                    "mean": np.array(s["mean"], dtype=np.float32),
+                    "std": np.array(s["std"], dtype=np.float32),
+                    "min": np.array(s["min"], dtype=np.float32) if "min" in s else None,
+                    "max": np.array(s["max"], dtype=np.float32) if "max" in s else None,
+                    "count": float(count_val),
+                }
+
+        # 2. Try disk meta/stats.json if root is available
+        if self.root is not None:
+            stats_path = self.root / "meta" / "stats.json"
+            if not stats_path.exists() and (self.root / "stats.json").exists():
+                stats_path = self.root / "stats.json"
+            if stats_path.exists():
+                try:
+                    import json
+                    with open(stats_path, "r") as f:
+                        stats_dict = json.load(f)
+                    if native_key in stats_dict:
+                        s = stats_dict[native_key]
+                        if "mean" in s and "std" in s:
+                            count = s.get("count", [1])
+                            count_val = count[0] if isinstance(count, (list, np.ndarray)) else count
+                            return {
+                                "mean": np.array(s["mean"], dtype=np.float32),
+                                "std": np.array(s["std"], dtype=np.float32),
+                                "min": np.array(s["min"], dtype=np.float32) if "min" in s else None,
+                                "max": np.array(s["max"], dtype=np.float32) if "max" in s else None,
+                                "count": float(count_val),
+                            }
+                except Exception:
+                    pass
+
+        return None
+
 
 
 @register_format
