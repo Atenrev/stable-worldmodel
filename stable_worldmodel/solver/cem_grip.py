@@ -81,3 +81,22 @@ class GripperBernoulliCEMSolver(CEMSolver):
         outputs['grip_p'] = p.detach().cpu()
         print(f'CEM (discrete gripper) solve time: {time.time() - start_time:.4f} seconds')
         return outputs
+
+
+class PriorInitCEMSolver(CEMSolver):
+    """CEM whose initial distribution is the model's action prior along its prior-mean imagined rollout
+    (``model.prior_plan(info_dict, horizon) -> mean, std``), with the std scaled by ``std_scale``."""
+
+    def __init__(self, *args, std_scale: float = 2.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.std_scale = float(std_scale)
+
+    @torch.inference_mode()
+    def solve(self, info_dict: dict, init_action: torch.Tensor | None = None) -> dict:
+        mu, sd = self.model.prior_plan(info_dict, self.horizon)
+        mu, sd = mu.to(self.dtype).cpu(), (self.std_scale * sd).to(self.dtype).cpu()
+        self.init_action_distrib = lambda n, actions=None: (mu, sd)
+        try:
+            return super().solve(info_dict, None)
+        finally:
+            del self.init_action_distrib
