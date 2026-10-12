@@ -117,8 +117,10 @@ class LiberoGoal(gym.Env):
         codec_pad: int = 8,
         codec_crf: int = 30,
         render_mode: str = 'rgb_array',
+        terminate_on_success: bool = True,
         **kwargs,
     ):
+        self.terminate_on_success = bool(terminate_on_success)
         assert camera_view in ('agentview', 'both'), camera_view
         self.suite_name = suite
         self.camera_view = camera_view
@@ -382,7 +384,7 @@ class LiberoGoal(gym.Env):
         obs, _, _, _ = self._env.step(action)
         self._set_obs(obs)
         out, info, metrics = self._obs_info(obs)
-        terminated = bool(metrics.get('state_success', False))
+        terminated = bool(metrics.get('state_success', False)) and self.terminate_on_success
         reward = -float(metrics.get('eef_dist', 0.0) + metrics.get('obj_dist', 0.0))
         return out, reward, terminated, False, info
 
