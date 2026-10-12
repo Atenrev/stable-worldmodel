@@ -1,5 +1,6 @@
 from .categorical_cem import CategoricalCEMSolver
 from .cem import CEMSolver
+from .cem_grip import GripperBernoulliCEMSolver
 from .gd import GradientSolver
 from .icem import ICEMSolver
 from .lagrangian import LagrangianSolver
@@ -12,6 +13,7 @@ __all__ = [
     'Solver',
     'GradientSolver',
     'CEMSolver',
+    'GripperBernoulliCEMSolver',
     'CategoricalCEMSolver',
     'ICEMSolver',
     'PGDSolver',
