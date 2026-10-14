@@ -213,6 +213,8 @@ class CEMSolver:
 
                 # Force the first sample to be the current mean
                 candidates[:, 0] = batch_mean
+                if hasattr(self, '_modify_candidates'):  # subclass hook (e.g. mixed initial population)
+                    candidates = self._modify_candidates(candidates, step)
 
                 # Evaluate candidates
                 costs = self._score(expanded_infos, candidates)

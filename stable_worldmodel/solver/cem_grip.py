@@ -85,16 +85,46 @@ class GripperBernoulliCEMSolver(CEMSolver):
 
 class PriorInitCEMSolver(CEMSolver):
     """CEM whose initial distribution is the model's action prior along its prior-mean imagined rollout
-    (``model.prior_plan(info_dict, horizon) -> mean, std``), with the std scaled by ``std_scale``."""
+    (``model.prior_plan(info_dict, horizon) -> mean, std``), with the std scaled by ``std_scale``.
 
-    def __init__(self, *args, std_scale: float = 2.0, **kwargs):
+    Options:
+      fixed_std: use this scalar std for every dimension instead of ``std_scale`` x the prior's std.
+      mix: first iteration only, replace half the population by plain-CEM samples N(0, var_scale) so that CEM
+        selection can fall back on the unit Gaussian when the proposal is wrong.
+      hold_arm: z-scored per-step arm action of zero motion (6 values); adds two first-iteration candidates that
+        hold still with the gripper open / closed (``hold_grip``, z-scored).
+    """
+
+    def __init__(self, *args, std_scale: float = 2.0, fixed_std: float | None = None, mix: bool = False,
+                 hold_arm=None, hold_grip=(-0.723, 1.404), **kwargs):
         super().__init__(*args, **kwargs)
         self.std_scale = float(std_scale)
+        self.fixed_std = None if fixed_std is None else float(fixed_std)
+        self.mix = bool(mix)
+        self.hold_arm = None if hold_arm is None else [float(x) for x in hold_arm]
+        self.hold_grip = [float(x) for x in hold_grip]
+
+    def _modify_candidates(self, candidates, step):
+        if step != 0:
+            return candidates
+        n = candidates.shape[1]
+        if self.mix:
+            noise = torch.randn(candidates[:, n // 2:].shape, generator=self.torch_gen, device=candidates.device,
+                                dtype=candidates.dtype)
+            candidates[:, n // 2:] = self.var_scale * noise
+        if self.hold_arm is not None:
+            A = candidates.shape[-1]
+            for i, g in enumerate(self.hold_grip):
+                step_a = torch.tensor(self.hold_arm + [g], device=candidates.device, dtype=candidates.dtype)
+                candidates[:, n - 1 - i] = step_a.repeat(A // len(step_a))
+        return candidates
 
     @torch.inference_mode()
     def solve(self, info_dict: dict, init_action: torch.Tensor | None = None) -> dict:
         mu, sd = self.model.prior_plan(info_dict, self.horizon)
-        mu, sd = mu.to(self.dtype).cpu(), (self.std_scale * sd).to(self.dtype).cpu()
+        print(f'prior_plan mean std {sd.float().mean().item():.4f}')
+        sd = torch.full_like(sd, self.fixed_std) if self.fixed_std is not None else self.std_scale * sd
+        mu, sd = mu.to(self.dtype).cpu(), sd.to(self.dtype).cpu()
         self.init_action_distrib = lambda n, actions=None: (mu, sd)
         try:
             return super().solve(info_dict, None)
