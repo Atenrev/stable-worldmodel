@@ -3,6 +3,7 @@
 
 import time
 
+import numpy as np
 import torch
 
 from .cem import CEMSolver
@@ -93,16 +94,22 @@ class PriorInitCEMSolver(CEMSolver):
         selection can fall back on the unit Gaussian when the proposal is wrong.
       hold_arm: z-scored per-step arm action of zero motion (6 values); adds two first-iteration candidates that
         hold still with the gripper open / closed (``hold_grip``, z-scored).
+      stop_log: after each solve, print per env the encoded current cost to the goal (c0), the predicted cost of the
+        best hold candidate and of the chosen plan, and the env's state_success flag if present ("STOPLOG ...").
+      stop_threshold: if c0 < threshold, execute the best hold candidate instead of CEM's plan (needs hold_arm).
     """
 
     def __init__(self, *args, std_scale: float = 2.0, fixed_std: float | None = None, mix: bool = False,
-                 hold_arm=None, hold_grip=(-0.723, 1.404), **kwargs):
+                 hold_arm=None, hold_grip=(-0.723, 1.404), stop_log: bool = False,
+                 stop_threshold: float | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.std_scale = float(std_scale)
         self.fixed_std = None if fixed_std is None else float(fixed_std)
         self.mix = bool(mix)
         self.hold_arm = None if hold_arm is None else [float(x) for x in hold_arm]
         self.hold_grip = [float(x) for x in hold_grip]
+        self.stop_log = bool(stop_log)
+        self.stop_threshold = None if stop_threshold is None else float(stop_threshold)
 
     def _modify_candidates(self, candidates, step):
         if step != 0:
@@ -127,6 +134,41 @@ class PriorInitCEMSolver(CEMSolver):
         mu, sd = mu.to(self.dtype).cpu(), sd.to(self.dtype).cpu()
         self.init_action_distrib = lambda n, actions=None: (mu, sd)
         try:
-            return super().solve(info_dict, None)
+            out = super().solve(info_dict, None)
         finally:
             del self.init_action_distrib
+        if (self.stop_log or self.stop_threshold is not None) and self.hold_arm is not None:
+            self._stop_rule(info_dict, out)
+        return out
+
+    def _stop_rule(self, info_dict, out):
+        """Score [hold open, hold closed, chosen plan] with the model; c0 = encoded current latent's cost to the goal."""
+        plan = out['actions'].to(self.device, self.dtype)  # (B, H, A)
+        B, Hh, A = plan.shape
+        holds = []
+        for g in self.hold_grip:
+            step_a = torch.tensor(self.hold_arm + [g], device=self.device, dtype=self.dtype)
+            holds.append(step_a.repeat(A // len(step_a)).expand(B, Hh, A))
+        cands = torch.stack(holds + [plan], 1)  # (B, 3, H, A)
+        n = cands.shape[1]
+        ex = {}
+        for k, v in info_dict.items():
+            if torch.is_tensor(v):
+                v = v.to(device=self.device, dtype=self.dtype if v.is_floating_point() else None)
+                ex[k] = v.unsqueeze(1).expand(B, n, *v.shape[1:])
+            elif isinstance(v, np.ndarray):
+                ex[k] = np.repeat(v[:, None, ...], n, axis=1)
+        cost = self.model.get_cost(ex, cands).float()  # (B, 3)
+        pe, ge = ex['predicted_emb'], ex['goal_emb']
+        c0 = (pe[:, 0, 0].float() - ge[:, 0, -1].float()).pow(2).flatten(1).sum(-1)  # (B,)
+        succ = info_dict.get('state_success')
+        if succ is not None:
+            succ = np.asarray(succ.cpu() if torch.is_tensor(succ) else succ).reshape(B, -1)[:, -1]
+        hold_best = cost[:, :2].argmin(1)
+        for i in range(B):
+            if self.stop_log:
+                s_i = 'NA' if succ is None else int(bool(succ[i]))
+                print(f'STOPLOG c0 {c0[i].item():.4f} hold {cost[i, hold_best[i]].item():.4f} '
+                      f'plan {cost[i, 2].item():.4f} succ {s_i}')
+            if self.stop_threshold is not None and c0[i].item() < self.stop_threshold:
+                out['actions'][i] = cands[i, hold_best[i]].to(out['actions'].dtype).cpu()
